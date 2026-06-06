@@ -52,7 +52,7 @@ export default function PortalCobranca() {
 
   // Escuta dados em tempo real do Firebase
   useEffect(() => {
-    const registrosRef = ref(db, "registros");
+    const registrosRef = ref(db, "cobrancas");
     const unsubscribe = onValue(registrosRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
@@ -77,7 +77,7 @@ export default function PortalCobranca() {
 
     setSalvando(true);
     try {
-      await push(ref(db, "registros"), {
+      await push(ref(db, "cobrancas"), {
         cobrador,
         idBoleto: idBoleto.trim(),
         nomeCliente: nomeCliente.trim(),
@@ -96,7 +96,7 @@ export default function PortalCobranca() {
 
   const excluir = async (firebaseKey) => {
     try {
-      await remove(ref(db, `registros/${firebaseKey}`));
+      await remove(ref(db, `cobrancas/${firebaseKey}`));
     } catch {
       alert("Erro ao remover registro.");
     }
