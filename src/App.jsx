@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
+import { ref, onValue, push, remove } from "firebase/database";
+import { db } from "./firebase";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, Legend } from "recharts";
 
 const COBRADORES = ["Gabriela", "Yasmin"];
-const STORAGE_KEY = "xt-cobranca-registros";
 const SENHA_ADMIN = "xt2025";
 
 function formatCurrency(val) {
@@ -44,48 +45,28 @@ export default function PortalCobranca() {
   const [filtroMes, setFiltroMes] = useState("");
   const [busca, setBusca] = useState("");
 
-  // Admin
   const [adminAutenticado, setAdminAutenticado] = useState(false);
   const [senhaInput, setSenhaInput] = useState("");
   const [erroSenha, setErroSenha] = useState("");
-
-  // Exclusão
   const [confirmarExclusao, setConfirmarExclusao] = useState(null);
 
-  // Carrega dados do storage compartilhado
-  const carregarRegistros = async () => {
-    try {
-      const result = await window.storage.get(STORAGE_KEY, true);
-      if (result?.value) setRegistros(JSON.parse(result.value));
-    } catch {
-      // sem dados ainda — começa vazio
-    } finally {
+  // Escuta dados em tempo real do Firebase
+  useEffect(() => {
+    const registrosRef = ref(db, "registros");
+    const unsubscribe = onValue(registrosRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const lista = Object.entries(data)
+          .map(([key, val]) => ({ ...val, firebaseKey: key }))
+          .sort((a, b) => new Date(b.registradoEm) - new Date(a.registradoEm));
+        setRegistros(lista);
+      } else {
+        setRegistros([]);
+      }
       setCarregando(false);
-    }
-  };
-
-  useEffect(() => {
-    carregarRegistros();
+    });
+    return () => unsubscribe();
   }, []);
-
-  // Recarrega ao voltar para a aba
-  useEffect(() => {
-    const onFocus = () => carregarRegistros();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, []);
-
-  const salvar = async (novos) => {
-    setSalvando(true);
-    try {
-      await window.storage.set(STORAGE_KEY, JSON.stringify(novos), true);
-      setRegistros(novos);
-    } catch {
-      setErro("Erro ao salvar. Tente novamente.");
-    } finally {
-      setSalvando(false);
-    }
-  };
 
   const confirmar = async () => {
     if (!cobrador || !idBoleto.trim() || !nomeCliente.trim() || !valorInput) {
@@ -94,27 +75,31 @@ export default function PortalCobranca() {
     const valor = parseCurrency(valorInput);
     if (!valor) { setErro("Valor inválido."); return; }
 
-    // Recarrega antes de salvar para evitar sobrescrever dados de outro usuário
-    let base = registros;
+    setSalvando(true);
     try {
-      const result = await window.storage.get(STORAGE_KEY, true);
-      if (result?.value) base = JSON.parse(result.value);
-    } catch {}
-
-    const novo = { id: Date.now(), cobrador, idBoleto: idBoleto.trim(), nomeCliente: nomeCliente.trim(), valor, registradoEm: new Date().toISOString() };
-    await salvar([novo, ...base]);
-    setSuccess(true);
-    setIdBoleto(""); setNomeCliente(""); setValorInput(""); setErro("");
-    setTimeout(() => setSuccess(false), 2500);
+      await push(ref(db, "registros"), {
+        cobrador,
+        idBoleto: idBoleto.trim(),
+        nomeCliente: nomeCliente.trim(),
+        valor,
+        registradoEm: new Date().toISOString(),
+      });
+      setSuccess(true);
+      setIdBoleto(""); setNomeCliente(""); setValorInput(""); setErro("");
+      setTimeout(() => setSuccess(false), 2500);
+    } catch {
+      setErro("Erro ao salvar. Tente novamente.");
+    } finally {
+      setSalvando(false);
+    }
   };
 
-  const excluir = async (id) => {
-    let base = registros;
+  const excluir = async (firebaseKey) => {
     try {
-      const result = await window.storage.get(STORAGE_KEY, true);
-      if (result?.value) base = JSON.parse(result.value);
-    } catch {}
-    await salvar(base.filter(r => r.id !== id));
+      await remove(ref(db, `registros/${firebaseKey}`));
+    } catch {
+      alert("Erro ao remover registro.");
+    }
     setConfirmarExclusao(null);
   };
 
@@ -164,8 +149,15 @@ export default function PortalCobranca() {
   }).sort((a, b) => b.total - a.total);
 
   const dadosPorDia = (() => {
+    const base = filtroMes
+      ? registros.filter(r => {
+          const d = new Date(r.registradoEm);
+          const mes = `${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+          return mes === filtroMes;
+        })
+      : registros;
     const mapa = {};
-    registros.forEach(r => {
+    base.forEach(r => {
       const dia = new Date(r.registradoEm).toLocaleDateString("pt-BR", { day:"2-digit", month:"2-digit" });
       if (!mapa[dia]) { mapa[dia] = { dia }; COBRADORES.forEach(n => mapa[dia][n] = 0); }
       mapa[dia][r.cobrador] = (mapa[dia][r.cobrador] || 0) + Number(r.valor);
@@ -222,7 +214,6 @@ export default function PortalCobranca() {
 
       {salvando && <div className="saving-bar" />}
 
-      {/* MODAL CONFIRMAR EXCLUSÃO */}
       {confirmarExclusao !== null && (
         <div className="modal-overlay">
           <div className="card" style={{ maxWidth:"380px", width:"90%", textAlign:"center" }}>
@@ -237,7 +228,6 @@ export default function PortalCobranca() {
         </div>
       )}
 
-      {/* HEADER */}
       <div style={{ borderBottom:"1px solid var(--border)", padding:"20px 40px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         <div>
           <div style={{ fontFamily:"'Syne',sans-serif", fontSize:"18px", fontWeight:800, letterSpacing:"3px" }}>
@@ -247,14 +237,14 @@ export default function PortalCobranca() {
         </div>
         <div style={{ display:"flex", gap:"8px" }}>
           <button className={`nav-btn ${view==="form"?"active":""}`} onClick={() => setView("form")}>Registrar</button>
-          <button className={`nav-btn ${view==="historico"?"active":""}`} onClick={() => { setView("historico"); carregarRegistros(); }}>Histórico</button>
-          <button className={`nav-btn ${view==="admin"?"active":""}`} onClick={() => { setView("admin"); carregarRegistros(); }}>Supervisão</button>
+          <button className={`nav-btn ${view==="historico"?"active":""}`} onClick={() => setView("historico")}>Histórico</button>
+          <button className={`nav-btn ${view==="admin"?"active":""}`} onClick={() => setView("admin")}>Supervisão</button>
         </div>
       </div>
 
       <div style={{ maxWidth:"720px", margin:"0 auto", padding:"48px 24px" }}>
 
-        {/* ── FORM ── */}
+        {/* FORM */}
         {view === "form" && (
           <div>
             <div style={{ marginBottom:"32px" }}>
@@ -292,7 +282,7 @@ export default function PortalCobranca() {
           </div>
         )}
 
-        {/* ── HISTÓRICO ── */}
+        {/* HISTÓRICO */}
         {view === "historico" && (
           <div>
             <div style={{ marginBottom:"24px", display:"flex", alignItems:"flex-end", justifyContent:"space-between" }}>
@@ -304,13 +294,13 @@ export default function PortalCobranca() {
                 <button className="btn-ghost" onClick={exportarCSV}>↓ Exportar CSV</button>
               )}
             </div>
-            <div style={{ marginBottom:"16px", display:"flex", gap:"8px" }}>
-              <input className="inp" type="text" value={busca} onChange={e => setBusca(e.target.value)} placeholder="Buscar por cliente, ID ou cobrador..." style={{ flex:1 }} />
-              <select className="inp" value={filtroMes} onChange={e => setFiltroMes(e.target.value)} style={{ width:"160px" }}>
+            <div style={{ marginBottom:"16px", display:"flex", gap:"8px", flexWrap:"wrap" }}>
+              <input className="inp" type="text" value={busca} onChange={e => setBusca(e.target.value)} placeholder="Buscar por cliente, ID ou cobrador..." style={{ flex:1, minWidth:"180px" }} />
+              <select className="inp" value={filtroMes} onChange={e => setFiltroMes(e.target.value)} style={{ width:"150px" }}>
                 <option value="">Todos os meses</option>
                 {mesesDisponiveis.map(m => <option key={m} value={m}>{m}</option>)}
               </select>
-              <select className="inp" value={filtroNome} onChange={e => setFiltroNome(e.target.value)} style={{ width:"180px" }}>
+              <select className="inp" value={filtroNome} onChange={e => setFiltroNome(e.target.value)} style={{ width:"160px" }}>
                 <option value="">Todos</option>
                 {COBRADORES.map(n => <option key={n}>{n}</option>)}
               </select>
@@ -331,7 +321,7 @@ export default function PortalCobranca() {
                   </thead>
                   <tbody>
                     {registrosFiltrados.map(r => (
-                      <tr key={r.id} className="tr">
+                      <tr key={r.firebaseKey} className="tr">
                         <td style={{ padding:"12px 16px", color:"var(--gold)" }}>{r.cobrador}</td>
                         <td style={{ padding:"12px 16px" }}>{r.idBoleto}</td>
                         <td style={{ padding:"12px 16px", color:"var(--muted)" }}>{r.nomeCliente}</td>
@@ -356,7 +346,7 @@ export default function PortalCobranca() {
           </div>
         )}
 
-        {/* ── SUPERVISÃO ── */}
+        {/* SUPERVISÃO */}
         {view === "admin" && (
           <div>
             {!adminAutenticado ? (
@@ -368,7 +358,7 @@ export default function PortalCobranca() {
                 <div className="card" style={{ marginBottom:"16px" }}>
                   <label className="label">Senha</label>
                   <input className="inp" type="password" value={senhaInput} onChange={e => { setSenhaInput(e.target.value); setErroSenha(""); }} placeholder="••••••••" onKeyDown={e => e.key === "Enter" && entrarAdmin()} />
-                  {erroSenha && <div style={{ marginTop:"12px", color:"var(--danger)", fontSize:"12px", letterSpacing:"1px" }}>✗  {erroSenha}</div>}
+                  {erroSenha && <div style={{ marginTop:"12px", color:"var(--danger)", fontSize:"12px" }}>✗  {erroSenha}</div>}
                 </div>
                 <button className="btn" onClick={entrarAdmin} disabled={!senhaInput}>Entrar</button>
               </div>
@@ -380,7 +370,7 @@ export default function PortalCobranca() {
                     <div style={{ color:"var(--muted)", fontSize:"13px" }}>Resultado das cobradores no período</div>
                   </div>
                   <div style={{ display:"flex", gap:"8px", alignItems:"center" }}>
-                    <select className="inp" value={filtroMes} onChange={e => setFiltroMes(e.target.value)} style={{ width:"160px", padding:"8px 14px", fontSize:"12px" }}>
+                    <select className="inp" value={filtroMes} onChange={e => setFiltroMes(e.target.value)} style={{ width:"150px", padding:"8px 14px", fontSize:"12px" }}>
                       <option value="">Todos os meses</option>
                       {mesesDisponiveis.map(m => <option key={m} value={m}>{m}</option>)}
                     </select>
@@ -388,7 +378,6 @@ export default function PortalCobranca() {
                   </div>
                 </div>
 
-                {/* RANKING */}
                 <div style={{ display:"flex", flexDirection:"column", gap:"2px", marginBottom:"2px" }}>
                   {ranking.map((c, i) => {
                     const max = ranking[0]?.total || 1;
@@ -411,7 +400,6 @@ export default function PortalCobranca() {
                   })}
                 </div>
 
-                {/* GRÁFICO BARRAS */}
                 <div className="card" style={{ marginBottom:"2px" }}>
                   <div style={{ fontSize:"10px", letterSpacing:"2px", color:"var(--muted)", textTransform:"uppercase", marginBottom:"20px" }}>Recebido por cobrador</div>
                   <ResponsiveContainer width="100%" height={180}>
@@ -425,7 +413,6 @@ export default function PortalCobranca() {
                   </ResponsiveContainer>
                 </div>
 
-                {/* GRÁFICO LINHA */}
                 {dadosPorDia.length > 1 && (
                   <div className="card" style={{ marginBottom:"2px" }}>
                     <div style={{ fontSize:"10px", letterSpacing:"2px", color:"var(--muted)", textTransform:"uppercase", marginBottom:"20px" }}>Evolução diária</div>
@@ -444,7 +431,6 @@ export default function PortalCobranca() {
                   </div>
                 )}
 
-                {/* TABELA COM REMOÇÃO */}
                 <div className="card" style={{ padding:0, marginBottom:"2px" }}>
                   <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                     <span style={{ fontSize:"10px", letterSpacing:"2px", color:"var(--muted)", textTransform:"uppercase" }}>Todos os registros</span>
@@ -463,14 +449,14 @@ export default function PortalCobranca() {
                       </thead>
                       <tbody>
                         {registros.map(r => (
-                          <tr key={r.id} className="tr">
+                          <tr key={r.firebaseKey} className="tr">
                             <td style={{ padding:"10px 16px", color:"var(--gold)" }}>{r.cobrador}</td>
                             <td style={{ padding:"10px 16px" }}>{r.idBoleto}</td>
                             <td style={{ padding:"10px 16px", color:"var(--muted)" }}>{r.nomeCliente}</td>
                             <td style={{ padding:"10px 16px" }}>{formatCurrency(r.valor)}</td>
                             <td style={{ padding:"10px 16px", color:"var(--muted)", fontSize:"11px" }}>{formatDate(r.registradoEm)}</td>
                             <td style={{ padding:"10px 16px" }}>
-                              <button className="btn-danger" onClick={() => setConfirmarExclusao(r.id)}>Remover</button>
+                              <button className="btn-danger" onClick={() => setConfirmarExclusao(r.firebaseKey)}>Remover</button>
                             </td>
                           </tr>
                         ))}
@@ -479,7 +465,6 @@ export default function PortalCobranca() {
                   )}
                 </div>
 
-                {/* TOTAIS */}
                 <div style={{ display:"flex", gap:"2px" }}>
                   <div className="card" style={{ flex:1, textAlign:"center" }}>
                     <div style={{ fontSize:"10px", letterSpacing:"2px", color:"var(--muted)", textTransform:"uppercase", marginBottom:"8px" }}>Total geral</div>
@@ -490,7 +475,6 @@ export default function PortalCobranca() {
                     <div style={{ fontSize:"22px" }}>{registros.length}</div>
                   </div>
                 </div>
-
               </div>
             )}
           </div>
